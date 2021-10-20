@@ -1,5 +1,5 @@
 ---
-title: "Title"
+title: "Explorative Data Analysis"
 author: "[Peter Baumgartner](https://github.com/petzi53)"
 date: "Last updated: `r format(Sys.time(), '%d %B, %Y')`"
 output:
@@ -7,6 +7,7 @@ output:
     css: style.css
     theme: united
     toc: true
+    pandoc_args: --number-offset=1,0
     toc_float:
       collapsed: false
       smooth_scroll: true
@@ -18,119 +19,103 @@ bibliography: references.bib
 link-citations: true
 ---
 
-# Intro {-}
+```{r setup}
+library(tidyverse)
+library(repairData)
 
-Template based on [Rmarkdown](https://bookdown.org/yihui/rmarkdown/), using the [united HTML theme](https://bootswatch.com/united/).
+knitr::opts_chunk$set(echo = TRUE) 
 
-Refer to a [sub section](#sub-analysis). 
-Citing an article [@article]. 
-Refer to section [Analysis].
-
-# Input {-}
-
-Loading libraries:
-```{r Load libraries, message = FALSE}
-library(DT)
-library(ggplot2)
-library(xfun)
 ```
 
-# Analysis {-}
+## Name of variables and factor levels
 
-`Vestibulum` imperdiet^[Nullam quis sem nunc], ex vel sodales facilisis, nibh tellus imperdiet massa, sit amet scelerisque orci velit vel tellus. Ut consequat justo tincidunt porttitor varius. Suspendisse erat ipsum, feugiat vitae rhoncus non, molestie ac purus. Morbi aliquet, elit eget blandit suscipit, est lacus facilisis turpis, nec fermentum nunc felis et lorem.
+```{r glimpse-data}
+data(repairs)
+glimpse(repairs)
+```
 
-::: {#Table1}
-A nice table example:
-:::
+## Shorten some column names
+
+For less typing I will shorten some variable names.
+
+
+```{r shorten-col-names}
+repair_df <- repairs |> 
+  rename(end_of_life_barrier = repair_barrier_if_end_of_life) |> 
+  rename(product_description = partner_product_category) |> 
+  rename(group_id = group_identifier)
+glimpse(repair_df)
+```
+
+## Convert "????" to NA
+
+The variable year_of_manufacture has "????" as NA. This is not a usable value for graphs, especially as the variable should be numerical e.g. an integer.
+
+I will substitute "????" with the standard `NA` code. For this purpose I was planning to use the `naniar` package. It has the function replace_with_na(). The vignette [Replacing values with NA](http://naniar.njtierney.com/articles/replace-with-na.html) explains how to use it.
+
+
+```{r replace-with-na}
+library(naniar)
+
+repair_tst <- repair_df |>
+  replace_with_na(replace = list(year_of_manufacture = '????'))
+
+glimpse(repair_tst)
+```
+
+This works. But I also wanted to change year_of_manufacture to a variable type integer. If I am using the base R function `as.integer()` all values that are not convertible, e.g., are not a number stored as character string, will be coerced to NA's. Many times this side effect is not desired and therefore `as_integer()` (and friends) was developed. This set of underscore coercion functions (`as_logical()`, `as_integer()`, `as_character()` etc.) is soft-deprecated recently with `vec_cast()`, a function from the vector helpers package `vctrs`. But in my case this side effect is just the desired behavior!
+
+```{r convert-year-to-integer, warning=TRUE}
+repair_df <- repair_df |> 
+  mutate(year_of_manufacture = as.integer(year_of_manufacture)) 
+
+glimpse(repair_df)
+```
+
+## Revise factor levels
+
+
+The variable `end_of_life_barrier` is in `r count(repair_df, end_of_life_barrier)[1,2]` cases empty. The reasons are twofold:
+
+1. The variable is only applicable when repair_status has the value "End of Life".
+2. Values are missing, even if repair_status = "End of Life".
+
+I will clarify this situation by imputing
+1. "not applicable" in all those case where `repair_status` is NOT "End of Life" and
+2. `NA` whenever `repair_status` IS "End of Life" and the field is empty. 
+
+To add new values for factors needs an extra step: The creation of a new level (category) with this value. To make my above outlined changes I convert `end_of_life_barrier` therefore temporarily to a character variable.
+
 
 ```{r}
-DT::datatable(mtcars, options = list(pageLength = 3))
+repair_df <- repair_df |> 
+  mutate(end_of_life_barrier = as.character(end_of_life_barrier)) |> 
+  mutate(end_of_life_barrier = 
+           replace(end_of_life_barrier, 
+                   repair_status == "End of life" &
+                   end_of_life_barrier == "", NA)) |> 
+  mutate(end_of_life_barrier = 
+           replace(end_of_life_barrier, 
+                   repair_status != "End of life", 
+                   "not applicable")) |> 
+  mutate(end_of_life_barrier = factor(end_of_life_barrier))
+glimpse(repair_df)
 ```
 
-## Sub analysis {-}
+## Show all factor levels
 
-> Suspendisse potenti
+```{r show-all-factor-levels}
 
-We can have math formulas inline like this: $E=mc^2$ or make them span an entire line like this:
-
-::: {#eq1} 
-:::
-
-$$f=\frac{a}{b+c}$$
-
-**Create a horizontal line** using [markdown syntax](https://commonmark.org/help/):
-
-----
-
-Cras pulvinar ligula ac nisi porttitor, volutpat congue orci tincidunt. Pellentesque non mi congue, porta enim eget, venenatis sem. Integer suscipit vulputate tellus, eget commodo dolor gravida vel. Suspendisse gravida gravida ligula, in interdum sapien molestie ut.
-
-### Yet another analysis {-}
-
-::: {.blue-box}
-In ut vehicula risus.
-Refer to the [table](#Table1) above!
-:::
-
-```{r example plot, warning = FALSE, fig.align='center'}
-options(scipen=999)  # turn-off scientific notation like 1e+48
-theme_set(theme_bw())  # pre-set the bw theme.
-data("midwest", package = "ggplot2")
-# midwest <- read.csv("http://goo.gl/G1K41K")  # bkup data source
-
-# Scatterplot
-gg = ggplot(midwest, aes(x=area, y=poptotal)) + 
-  geom_point(aes(col=state, size=popdensity)) + 
-  geom_smooth(method="loess", se=F) + 
-  xlim(c(0, 0.1)) + 
-  ylim(c(0, 500000)) + 
-  labs(subtitle="Area Vs Population", 
-       y="Population", 
-       x="Area", 
-       title="Scatterplot", 
-       caption = "Source: midwest")
-
-plot(gg)
+repair_df %>% purrr::map(levels)
 ```
 
-Remember [equation 1](#eq1)!
 
-# Conclusion {-}
+## Skim all variables
 
-::: {#box1 .green-box}
-Wrapping it up!
-:::
+```{r}
+library(skimr)
 
-::: {#box2 .info-box .caution}
-- *Cras tincidunt* felis venenatis pretium iaculis^[In eget eros sit amet leo feugiat consequat]. 
-- Curabitur in **tortor at tellus** fermentum elementum vel quis sem.
-- That sums it up!
-:::
-
-::: {#box3 .info-box .warning}
-Be careful, be gentle, be brave! 
-And remember the above [box!](#box1)
-:::
-
-::: {.info-box .tip}
-A tip!
-:::
-
-::: {.info-box .note}
-A note!
-:::
-
-::: {.info-box .important}
-I have something **important** to say here!
-:::
-
-::: {#box4 .orange-box}
-An orange box!!!
-:::
-
-# R session info {-}
-
-```{r session info, comment=""}
-xfun::session_info()
+skim(repair_df)
 ```
 
-# References {-}
+
