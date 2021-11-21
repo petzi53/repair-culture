@@ -1,0 +1,2055 @@
+---
+title: "Prepare and clean repairs dataset"
+author: "[Peter Baumgartner](https://github.com/petzi53)"
+date: "Last updated: `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    css: style.css
+    theme: united
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: false
+    code_folding: hide
+    code_download: true
+    df_print: paged
+bibliography: references.bib
+link-citations: true
+---
+
+# SETUP
+
+## General setup
+
+The general setup will
+
+- attach all the packages 
+- set up all the options  
+- load all the datasets
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(repairData)
+
+knitr::opts_chunk$set(echo = TRUE,
+                      comment = '')
+old <-  options(tibble.print_min = Inf, # print all table rows (not only 10)
+                tibble.min.chars = Inf, # print all columns
+                rows.print = 25)
+
+data(repairs)
+```
+
+## Output hook
+
+Set up an `output` hook to add a `style` attribute to the text output when the chunk option `max.height` is set. This trick is taken from the [R Markdown Cookbook](https://bookdown.org/yihui/rmarkdown-cookbook/hook-scroll.html).
+
+
+```{r set-output-hook}
+options(width = 95)
+local({
+  hook_output <- knitr::knit_hooks$get('output')
+  knitr::knit_hooks$set(output = function(x, options) {
+    if (!is.null(options$max.height)) options$attr.output <- c(
+      options$attr.output,
+      sprintf('style="max-height: %s;"', options$max.height)
+    )
+    hook_output(x, options)
+  })
+})
+```
+
+# PREPARE DATASET
+
+## First glimpse at data
+
+```{r glimpse-data}
+glimpse(repairs)
+```
+
+## Rename variables
+
+We have a dataset of 48.669 records with 12 variables. The names of the variables (columns) are well chosen. But to be self-explanatory, they are very long. To save typing, I will shorten the variable names:
+
+- data_providers -> providers
+- partner_product_category -> description
+- product_category -> category
+- year_of_manufacture -> year
+- repair_status -> status
+- repair_barrier_if_end_of_life -> barrier
+- group_identifier -> team_id
+- event_date -> date
+
+```{r rename-variables}
+repair_df <- repairs |> 
+  rename(provider = data_provider) |>
+  rename(description = partner_product_category) |> 
+  rename(category = product_category) |> 
+  rename(year = year_of_manufacture) |> 
+  rename(status = repair_status) |> 
+  rename(barrier = repair_barrier_if_end_of_life) |> 
+  rename(team_id = group_identifier) |> 
+  rename(date = event_date)
+
+glimpse(repair_df)
+```
+
+## Clean category levels
+
+[Open Repair Data Standard](https://standard.openrepair.org/standard.html#ords-product-category-values) (ORDS) defines 40 categories for repair items. 
+
+```{r show-category-levels}
+
+levels(repair_df$category)
+
+```
+
+It turned out that this factor variable has 41 levels, because one entry was misspelled. The record of id `rcwales_323` had "laptop" instead "Laptop" as category. Factor variables (and the programming language R in general) are case sensitives, so I need to change this entry. 
+
+Besides of this spelling error are the levels sorted by their first appearances, which is not helpful. I will therefore sort the levels alphabetically.
+
+```{r clean-category-levels}
+
+repair_df$category <- fct_collapse(repair_df$category,
+                                   Laptop = c("Laptop", "laptop"))
+
+repair_df$category <- fct_relevel(repair_df$category, sort)
+
+levels(repair_df$category)
+```
+
+
+## Create 2nd category column
+
+The column `category` is one of the most critical variables because all the very different items mentioned (and sometimes described extensively) under the heading of `partner_product_category` (now `description`) must be assigned to one of the 40 predefined device classes.
+
+After I inspected this important variable thoroughly, I noticed many wrong assignments. The reason for incorrect classifications are manifold:
+
+- The 40 categories do not cover all different classes of repair items.  Bikes, rollators, garments, furniture, and gardening tools, for instance, are missing.
+- The definition and, therefore, the distinction between different repair items are not chosen unambiguously. For example: What items belong to the group of `Handheld entertainment devices`? What is the difference between `**TV** and gaming-related accessories` and `Flat screen` or `TV and **gaming-related accessories**` and `Games console`?
+- Items are assigned into the wrong categories. For instance: Items with the denomination `watch` are classified not as `Watch/clock` but as `Decorative or safety lights` or `Hair dryer` not as `Hair dryer` but as `Hair & beauty item`.
+
+Data came from five different providers with different priorities, different main fields of attention, and therefore a different repair focus. These five provider joined the joint enterprise from their respective perspectives, e.g., they used various forms to collect data and had, therefore, a different list of categories as starting points. Many times the assignments per provider are consistent but differ considerably between them.
+
+Cleaning up the assignments for `category` is very important and was my primary concern and priority. The value of the dataset and its possible political and market influences depend first and foremost on the quality of this data.
+
+To reconstruct and reproduce all my changes, I will create a second variable, `category_2`. Except for all my (coming) changes, it will be a copy of `category`. But to facilitate the changes, I will create this variable with a type of character instead of a factor variable.
+
+> Some partner categorization comes as free text and sometimes in languages other than English. During processing, the partner category is often concatenated with another field, e.g., "product_kind" or "item_type", e.g., "Household appliances electric ~ Coffee maker", this extra detail helps in the mapping. Normalising the supplied categorisation makes the process of mapping less prone to error, mistranslation, ambiguity and subjectivity. (From the [ORDS paper](https://standard.openrepair.org/standard.html#partner-product-category).
+
+The names of respective group classes are of minor importance. They are not standardized between partners and are not as detailed as the 40 defined categories, e.g., they include only between 6 and 13 classes, and one provider does not use a general "product_kind" at all. As values for the variable `category` are not collected but supplied through mapping from the partner's product category, they will have their place in a detailed analysis. I will, therefore, not delete the variable `partner_procut_category` (alias `description`) even if it does not consist of standardized values and has a variety of different and overlapping terms consequently.
+
+I will separate the concatenated entries into variables `group` and `item` to facilitate my work. As I have hinted before, the new variable `group` is only in individual cases important, e.g., when item `vacuum cleaner` is linked with the group `toy` labeling a plaything, not an actual vacuum cleaner. 
+
+
+```{r create-new-variables}
+repair_df <- repair_df |>
+  #create category_2
+  mutate(category_2 = as.character(category), .before = brand) |> 
+  # separate description into group and item
+  separate(col = description, 
+           into = c('group', 'item'), sep = ' ~ ', fill = "left")
+
+glimpse(repair_df)
+
+```
+
+## Convert `year` 
+
+The variable `year` is of type character and has a string of four question marks ("????") for missing data (`NA`). "????" is not a usable value for calculations and graphs, especially as the variable should be numerical, e.g., an integer.
+
+The `year_of_manufacture` resp. now `year` is not an appropriate measure for [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence). Better is a variable `age` calculated as the difference of event `date` and `year` of manufacture.
+
+
+```{r year-to-factor}
+repair_df <- repair_df |> 
+  mutate(year = na_if(year, "????")) |> 
+  mutate(age =  lubridate::year(date) - as.integer(year), .after = year)
+
+tail(repair_df)
+```
+
+## Prepare variable `barrier`
+
+The variable `barrier` is in `r count(repair_df, barrier)[1,2]` cases empty. The reasons are twofold:
+
+1. The variable is only applicable when the repair `status` has the value "End of Life".
+2. Even if `status` is "End of Life", there are still values missing now real `NA`s.
+
+I will clarify this situation by imputing into `barrier`
+1. "not applicable" in all those cases where `status` is not "End of Life" and
+2. `NA` whenever `status` is "End of Life" and `barrier` is empty. 
+
+To add new values for factors needs an extra step: The creation of a new level (category) with this value. From the two options
+
+- to add levels `NA` and "not applicable" to the factor `barrier`.
+- to convert `barrier` temporarily to a character variable 
+
+I will choose the second one.
+
+After assigning the values `NA` and "not applicable" to the data the empty level still exists, even it does not have any value in the dataset. So the steps of the conversion procedure are:
+
+1. convert `barriere` to a character variable
+2. replace values of `barriere` variable
+  a) to `NA` whenever `status` is "End of life"
+  b) to `not applicable` when `status` is not "End of life" _and_ `barriere` is empty
+3. convert `barriere` again to factor variable
+
+```{r add-levels-as-characters}
+repair_df <- repair_df |> 
+  mutate(barrier = as.character(barrier)) |> 
+  mutate(barrier = replace(barrier, status == "End of life" & barrier == "", NA)) |> 
+  mutate(barrier = replace(barrier, status != "End of life", "not applicable")) |> 
+  mutate(barrier = factor(barrier))
+
+count(repair_df, barrier)
+```
+
+
+# CLEAN CATEGORY LEVELS
+
+## Introduction
+
+```{r cat-sorted-alpha, paged.print=FALSE}
+repair_cat <- repair_df
+repair_cat2 <- repair_df
+
+fct_count(repair_cat$category_2) |> 
+    rename(category = f) |> 
+    select(category) 
+```
+
+I will check all 40 levels one by one. 
+
+1. At first, I will look into the original dataset of every level to detect all wrong items.
+2. Then, I will write down each item I will transfer and the category level I will transfer them to.
+3. Finally, I will display the new dataset filtered by the appropriate level to see if everything turned out correctly. This is necessary because I am using algorithms to catch different wording variants of the wrong item with one strike. 
+
+
+
+## Aircon/dehumidifier
+
+### Original
+
+```{r aircon-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Aircon/dehumidifier") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+Transfer `Heater` and `fan heater` to `Small home electrical`.
+
+Following I will designate the transfer items with bullet points:
+
+- Heater -> `Small home electrical`
+- fan heater -> `Small home electrical`
+
+### Transfer wrong items
+
+
+```{r aicon-transfer}
+repair_cat2 <- repair_cat2 |> 
+  mutate(
+    category_2 = if_else(str_detect(repair_cat2$item, 
+                  regex("heater", ignore_case = TRUE)), 
+                  "Small home electrical", category_2)
+  )
+```
+
+### After cleanup
+
+```{r aircon-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Aircon/dehumidifier") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Battery/charger/adapter
+
+### Original
+
+```{r battery-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Battery/charger/adapter") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+### Transfer wrong items
+
+Here are battery and charger item addressed. Adapter in the meaning of
+power adapter. Cables, plugs, sockets, power strips etc. belong to
+`PC accessory`.
+
+Transfer:
+
+-   socket,
+-   plug,
+-   cord,
+-   extension cord,
+-   Steckdosenleiste,
+-   Kabel,
+-   cable,
+-   Distribution plug,
+-   Extension cable,
+-   extension lead,
+-   Extension lead,
+-   2 extension leads,
+-   2x extension leads,
+-   90 Day Pet Feeder - Battery Operated,
+-   Extention cable,
+-   LAN cable,
+-   plug,
+-   power socket,
+-   power strip,
+-   Record plug,
+-   Replace electrical socket,
+-   Smart plug,
+-   Socket / power strip,
+-   Stöpsel,
+-   usb plug,
+-   USB Plug.
+
+```{r battery-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "socket|plug|^cord|cord$|cable|Kabel|Steckdosenleiste|
+        |extension|extention|Stöpsel|Power strip|Power supply",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(str_starts(repair_cat2$item, "90 Day Pet Feeder"),
+            "Misc", category_2)
+    )
+```
+
+### After cleanup
+
+```{r battery-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Battery/charger/adapter") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Cofffee maker
+
+### Original
+
+```{r coffee-maker-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Coffee maker") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+**Everything is fine! No item transfer necessary.**
+
+## Decorative or safety lights
+
+### Original
+
+
+```{r lights-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Decorative or safety lights") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+### Transfer wrong items
+
+- `Lamp` -> `Lamp`
+- `watch` -> `Watch/clock`
+- `Blitzgerät` -> `Small home electrical`
+- `Book lamp` -> `Lamp`
+- `Picture frame` -> `Small home electrical`
+
+```{r lights-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Blitzgerät|Picture frame",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2),
+    category_2 = if_else(str_detect(repair_cat2$item, 
+                    regex("book lamp", ignore_case = TRUE)), 
+                    "Lamp", category_2),
+    category_2 = if_else(repair_cat2$item == "Lamp",
+                    "Lamp", category_2),
+    category_2 = if_else(str_detect(repair_cat2$item, 
+                    regex("Watch", ignore_case = TRUE)), 
+                    "Watch/clock", category_2)
+    )
+```
+
+
+
+### After cleanup
+
+ 
+```{r lights-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Decorative or safety lights") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Desktop computer
+
+### Original
+
+
+```{r computer-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Desktop computer") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+`Tischrechner` -> `Small home electrical`
+
+### Transfer wrong items
+
+
+```{r computer-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(str_detect(repair_cat2$item, 
+                    regex("Tischrechner", ignore_case = TRUE)), 
+                    "Small home electrical", category_2)
+    )
+```
+
+
+### After cleanup
+
+ 
+```{r computer-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Desktop computer") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+## Digital compact camera
+
+### Original
+
+```{r compact-camera-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Digital compact camera") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+`Tripod` -> `Misc` 
+
+
+### Transfer wrong items
+
+
+```{r compact-camera-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(str_detect(repair_cat2$item, 
+                    regex("Tripod", ignore_case = TRUE)), 
+                    "Misc", category_2)
+    )
+```
+
+
+### After cleanup
+
+ 
+```{r compact-camera-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Digital compact camera") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## DSLR/video camera
+
+### Original
+
+```{r video-camera-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "DSLR/video camera") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Video player/recorder -> `TV and gaming-related accessories`
+- Videorekorder -> `TV and gaming-related accessories`
+- Video/DVD player/recorder -> `TV and gaming-related accessories`
+- Polaroid -> `Digital compact camera`
+- 8mm VCR -> `TV and gaming-related accessories`
+- Analog camera -> `Misc`
+- Dashcam -> `Digital compact camera`
+- USB/Video capture device -> `PC accessory`
+
+### Transfer wrong items
+
+
+```{r video-camera-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Video player/recorder|Videorekorder|Video/DVD player/recorder|8mm VCR",
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2),
+    category_2 = if_else(grepl(
+    "Polaroid|Dashcam",
+        repair_cat2$item, ignore.case = TRUE), 
+        "Digital compact camera", category_2),
+    category_2 = if_else(repair_cat2$item == "Analog camera",
+                    "Misc", category_2),
+    category_2 = if_else(repair_cat2$item == "USB/Video capture device",
+                    "PC accessory", category_2)
+    )
+```
+
+
+###  After cleanup
+
+ 
+```{r video-camera-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "DSLR/video camera") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Fan
+
+### Original
+
+
+```{r fan-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Fan") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+### Transfer wrong items
+
+```{r fan-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "fan heater",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2)
+    )
+```
+
+
+### After cleanup
+
+```{r fan-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Fan") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Flat screen
+
+### Original
+
+```{r flat-screen-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Flat screen") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- baby monitor -> `Small home electrical`
+
+
+### Transfer wrong items
+
+```{r flat-screen-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "baby monitor",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r flat-screen-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Flat screen") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Food processor
+
+### Original
+
+```{r food-processor-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Food processor") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is correct!
+
+## Games console
+
+### Original
+
+```{r games-console-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Games console") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is correct!
+
+## Hair & beauty item
+
+### Original
+
+```{r hair-beauty-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Hair & beauty item") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- `Hair dryer` -> `Hair dryer`
+- Neck warmer -> `Small home electrical`
+- Watch -> `Watch/clock`
+
+### Transfer wrong items
+
+```{r hair-beauty-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Hair dryer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Hair dryer", category_2),
+    category_2 = if_else(grepl(
+        "Neck warmer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2),
+    category_2 = if_else(grepl(
+        "Watch",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Watch/clock", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r hair-beauty-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Hair & beauty item") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Handheld entertainment device
+
+### Original
+
+```{r handheld-device-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Handheld entertainment device") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Emphasis is on _entertainment_. To be a handheld device is not enough. 
+
+- CD Player -> `Hi-Fi separates`
+- Diabetrachter -> `Small home electrical`
+- Recorder -> `Hi-Fi separates`
+- Drone -> `Toy`
+- Cassette Player -> `Hi-Fi separates`
+- Voice recorder -> `PC accessory`
+- Gameboy -> `Games console`
+- Satnav -> `Tablet`
+- Dashcam -> `Digital compact camera`
+- Remote control -> `TV and gaming-related accessories`
+- calculator -> `Small home electrical`
+- Camera -> `DSLR/video camera`
+- CD/DVD player -> `TV and gaming-related accessories`
+- Games console controller -> `Games console`
+- Taschenrechner -> `Small home electrical`
+- A talking photo album -> `Small home electrical`
+- Calculator / Printer -> `Small home electrical`
+- Cycle computer -> `Decorative or safety lights`
+- Dictating machine -> `Small home electrical`
+- Digital Analague Converter -> `Small home electrical`
+- DVD player (portable) -> `TV and gaming-related accessories`
+- Electronic dictionary -> `Small home electrical`
+- External flash -> `Small home electrical`
+- Fit Bit -> `Watch/clock` 
+- Fitness tracker -> `Watch/clock` 
+- Fitness watch -> `Watch/clock`
+- Guitar tuner -> `Musical instrument`
+- Live streaming glasses -> `Small home electrical`
+- Multimeter -> `Small home electrical`
+- Musicbox -> `Toy`
+- Noise machine -> `Small home electrical`
+- Raspberry Pi -> `Small home electrical`
+- Reading pen -> `Small home electrical`
+- Robot -> `Toy`
+- Schrittzähler -> `Small home electrical`
+- Spell Master -> `Small home electrical`
+- Synthesizer -> `Musical instrument`
+- Walkie talkie -> `Toy`
+
+
+
+
+
+### Transfer wrong items
+
+```{r handheld-device-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+    "CD Player|Cassette Player",
+        repair_cat2$item, ignore.case = TRUE), 
+        "Hi-Fi separates", category_2),
+    category_2 = if_else(grepl(
+        "Diabetrachter|calculator|Taschenrechner|Calculator / Printer|Dictating machine|
+        |Digital Analague Converter|Electronic dictionary|External flash|
+        |Live streaming glasses|Multimeter|Noise machine|Raspberry Pi|Reading pen|
+        |Schrittzähler|Spell Master|A talking photo album",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2),
+    category_2 = if_else(category_2 == "Handheld entertainment device" & item == "Recorder",
+             "Hi-Fi separates", category_2),
+    category_2 = if_else(grepl(
+        "Remote control|DVD",
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2),
+    category_2 = if_else(grepl(
+        "Fit Bit|Fitness tracker|Fitness watch",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Watch/clock", category_2),
+    category_2 = if_else(grepl(
+        "Drone|Musicbox|Robot|Walkie talkie",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Toy", category_2),
+    category_2 = if_else(grepl(
+        "Voice recorder",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "Gameboy|Games console controller",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Games console", category_2),
+    category_2 = if_else(grepl(
+        "Satnav",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Tablet", category_2),
+    category_2 = if_else(grepl(
+        "Dashcam",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Digital compact camera", category_2),
+    category_2 = if_else(grepl(
+        "Camera",
+            repair_cat2$item, ignore.case = TRUE), 
+            "DSLR/video camera", category_2),
+    category_2 = if_else(grepl(
+        "Cycle computer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Decorative or safety lights", category_2),
+    category_2 = if_else(grepl(
+        "Guitar tuner|Synthesizer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Musical instrument", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r handheld-device-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Handheld entertainment device") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Headphones
+
+### Original
+
+```{r headphones-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Headphones") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- microphone -> `PC accessory`
+- Video camera -> `DSLR/video camera`
+
+
+### Transfer wrong items
+
+```{r headphones-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Microphone",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "Video camera",
+            repair_cat2$item, ignore.case = TRUE), 
+            "DSLR/video camera", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r headphones-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Headphones") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+## Hi-Fi integrated
+
+### Original
+
+```{r hifi-integrated-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Hi-Fi integrated") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Walkman -> `Handheld entertainment device`
+- CD Player -> `Hi-Fi separates`
+- Radio/CD player -> `Hi-Fi separates`
+- Turntable -> `Hi-Fi separates`
+- Cassette player -> `Hi-Fi separates`
+- Speaker -> `Hi-Fi separates`
+- Clock radio -> `Portable radio`
+- Radio/cassette player -> `Hi-Fi separates`
+- Amplifier -> `Hi-Fi separates`
+- Radio -> `Hi-Fi separates`
+- CD alarm -> `Hi-Fi separates`
+- CD/cassette player -> `Hi-Fi separates`
+- Docking station -> `PC accessory`
+- ghetto blaster -> `Portable radio`
+- gramophone -> `Misc`
+- juke box -> `Misc`
+- Music Player -> `Handheld entertainment device`
+- Remote control -> `TV and gaming-related accessories`
+- Stereo connections -> `TV and gaming-related accessories`
+- TV -> `Flat screen`
+
+
+### Transfer wrong items
+
+```{r hifi-integrated-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Walkman|Music player",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Handheld entertainment device", category_2),
+    category_2 = if_else(grepl(
+        "CD Player|Radio/CD player|Turntable|Cassette player|Speaker|
+        |Radio/cassette player|Amplifier|CD alarm|CD/cassette player",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Hi-Fi separates", category_2),
+    category_2 = if_else(category_2 == "Hi-Fi integrated" & item == "Radio",
+            "Hi-Fi separates", category_2),
+    category_2 = if_else(grepl(
+        "Clock radio|ghetto blaster",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Portable radio", category_2),
+    category_2 = if_else(grepl(
+        "Docking station",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "gramophone|juke box",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Misc", category_2),
+    category_2 = if_else(grepl(
+        "Remote control|Stereo connections",
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2),
+    category_2 = if_else(category_2 == "Hi-Fi integrated" & item == "TV",
+            "Flat screen", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r hifi-integrated-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Hi-Fi integrated") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## HiFi separates
+
+### Original
+
+```{r hifi-separates-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Hi-Fi separates") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+- Cd/dvd player -> `TV and gaming-related accessories`
+- Stereo -> `Hi-Fi integrated`
+- DVD/CD/radio player -> `TV and gaming-related accessories`
+- Dvd/video player -> `TV and gaming-related accessories`
+- DVD/CD player -> `TV and gaming-related accessories`
+- Sound mixer -> `Musical instrument`
+- Mischpult -> `Musical instrument`
+ -Dunstabzugshaube -> `Large home electrical`
+- Portable stereo -> `Hi-Fi integrated`
+- Docking station -> `PC accessory`
+- Car stereo -> `Misc`
+- MP3 player -> `Handheld entertainment device`
+- Baby Monitor -> `Small home electrical`
+- DVD/video player -> `TV and gaming-related accessories`
+- guitar amplifier -> `Musical instrument`
+- Keyboard -> `Musical instrument`
+- Midi Hifi -> `Hi-Fi integrated`
+- Mixer -> `Musical instrument`
+- Mixing tablet -> `Musical instrument`
+- music mixer -> `Musical instrument`
+- portable dvd -> `TV and gaming-related accessories`
+- portable DCD -> `TV and gaming-related accessories`
+- Portable dvd -> -> `TV and gaming-related accessories`
+- portable dvd player -> -> `TV and gaming-related accessories`
+- sound mixer -> `Musical instrument`
+- Speaker Cable -> `PC accessory` 
+- Stereo with speakers -> `Hi-Fi integrated`
+
+
+### Transfer wrong items
+
+```{r hifi-separates-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "dvd", 
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2),
+    category_2 = if_else(category_2 == "Hi-Fi separates" & item == "Stereo",
+            "Hi-Fi integrated", category_2),
+    category_2 = if_else(grepl(
+        "Sound mixer|Mischpult|guitar amplifier|Keyboard|Mixing tablet|music mixer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Musical instrument", category_2),
+    category_2 = if_else(category_2 == "Hi-Fi separates" & item == "mixer",
+                 "Musical instrument", category_2),
+    category_2 = if_else(grepl(
+        "Dunstabzugshaube", 
+            repair_cat2$item, ignore.case = TRUE), 
+            "Large home electrical", category_2),
+    category_2 = if_else(grepl(
+        "Docking station|Speaker cable", 
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "Car stereo|car cd player|cd alarm", 
+            repair_cat2$item, ignore.case = TRUE), 
+            "Misc", category_2),
+    category_2 = if_else(grepl(
+        "MP3|iPod", 
+            repair_cat2$item, ignore.case = TRUE), 
+            "Handheld entertainment device", category_2),
+    category_2 = if_else(grepl(
+        "Baby monitor", 
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r hifi-separates-cleaned, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Hi-Fi separates") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Iron
+
+### Original
+
+```{r iron-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Iron") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Every item assigned correctly.
+
+## Kettle
+
+### Original
+
+```{r kettle-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Kettle") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Every item assigned correctly.
+
+## Lamp
+
+### Original
+
+```{r lamp-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Lamp") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Bicycle lighting -> `Decorative or safety lights`
+- Flashlight -> `Decorative or safety lights`
+- Bicycle light -> `Decorative or safety lights`
+- Disco lamp -> `Decorative or safety lights`
+- exterior christmas lamp -> `Decorative or safety lights`
+- Nightlight/ flashlight -> `Decorative or safety lights`
+- salt lamp -> `Decorative or safety lights`
+- Salt lamp -> `Decorative or safety lights`
+- Salt Lamp -> `Decorative or safety lights`
+- screwdriver lamp -> `Decorative or safety lights`
+- sewing lamp with -> `Decorative or safety lights`
+
+### Transfer wrong items
+
+
+```{r lamp-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Bicycle light|Flashlight|Disco lamp|christmas lamp|salt lamp|
+        |screwdriver lamp|sewing lamp",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Decorative or safety lights", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r lamp, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Lamp") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+
+## Laptop
+
+### Original
+
+```{r laptop-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Laptop") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+HDMI port -> `PC accessory`
+
+### Transfer wrong item
+
+
+```{r laptop-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "HDMI port",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2)
+    )
+```
+
+### After cleanup
+
+```{r laptop-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Laptop") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Large home electrical
+
+### Original
+
+```{r large-home-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Large home electrical") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+- E-Auto -> `Misc`
+- Scrubber -> `Misc`
+
+
+### Transfer wrong item
+
+
+```{r large-home-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "E-Auto|Scrubber",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Misc", category_2)
+    )
+```
+
+### After cleanup
+
+```{r large-home-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Large home electrical") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+## Misc
+
+### Original
+
+```{r misc-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Misc") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+- Rollator -> `Large home electrical`
+- Fitness machine -> `Large home electrical`
+- E-bike -> `Large home electrical`
+- Electric bed -> `Large home electrical`
+- Electric bike -> `Large home electrical`
+- Hearing aid -> `Small home electrical`
+- Cable reel -> `PC accessory`
+- Microphone -> `PC accessory`
+- Boxwood shears -> `Large home electrical`
+- Electric scooter -> `Large home electrical`
+- Electric Scooter -> `Large home electrical`
+- Exercise bike -> `Large home electrical`
+- mobility scooter -> `Large home electrical`
+- Bicycle (Electric) -> `Large home electrical`
+- Crosstrainer -> `Large home electrical`
+- electric scooter -> `Large home electrical`
+- Electrical Scooter -> `Large home electrical`
+- Electronic vehicle -> `Large home electrical`
+- exercise bike -> `Large home electrical`
+- Foot warmer -> `Small home electrical`
+- lashing machine -> `Power tool`
+- Listening aid -> `Small home electrical`
+- Mobility scooter -> `Large home electrical`
+- Mobility Scooter -> `Large home electrical`
+- PH meter -> `Small home electrical`
+- scooter -> `Large home electrical`
+- Treadmill -> `Large home electrical`
+- Voltmeter -> `Small home electrical`
+
+
+
+
+### Transfer wrong item
+
+
+```{r misc-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "scooter|Rollator|Fitness machine|E-bike|Electric bed|Electric bike|
+        |Boxwood shears|Exercise bike|Bicycle \\(Electric\\)|Crosstrainer|
+        |Electronic vehicle|exercise bike|Treadmill|Exercise m/c",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Large home electrical", category_2),
+    category_2 = if_else(grepl(
+        "Hearing aid|Foot warmer|Listening aid|PH meter|Voltmeter",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2),
+    category_2 = if_else(grepl(
+        "Cable reel|Microphone",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+      category_2 = if_else(grepl(
+      "lashing machine",
+          repair_cat2$item, ignore.case = TRUE), 
+          "Power tool", category_2)
+    )
+```
+
+### After cleanup
+
+```{r misc-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Misc") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Mobile
+
+### Original
+
+```{r mobile-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Mobile") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is correct.
+
+## Musical instrument
+
+### Original
+
+```{r musical-instrument-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Musical instrument") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Amplifier -> `Hi-Fi separates`
+- Spieluhr -> `Toy`
+- Microphone -> `PC accessory`
+- Cable -> `PC accessory`
+- DVD/CD player -> `TV and gaming-related accessories`
+- Toy electric Guitar -> `Toy`
+
+### Transfer wrong item
+
+
+```{r musical-instrument-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Amplifier",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Hi-Fi separates", category_2),
+    category_2 = if_else(grepl(
+        "Spieluhr|Toy electric Guitar",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Toy", category_2),
+    category_2 = if_else(grepl(
+        "Microphone|Cable|Computer & Bluetooth keyboard", # last item already changed?
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "DVD/CD player",
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2),
+    category_2 = if_else(grepl(
+        "Straightners and Laptop keyboard",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Hair & beauty item", category_2)
+    )
+```
+
+### After cleanup
+
+```{r musical-instrument-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Musical instrument") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Paper shredder
+
+### Original
+
+```{r shredder-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Paper shredder") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everthing is fine.
+
+## PC accessory
+
+### Original
+
+```{r pc-accessory-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "PC accessory") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Charger -> `Battery/charger/adapter`
+- Laptop -> `Laptop`
+- DVD/CD player -> `TV and gaming-related accessories`
+- Kettle -> `Kettle`
+- Camera flash -> `Decorative or safety lights`
+- MP3 player -> `Handheld entertainment device`
+- Playstation -> `Games console`
+- Satnav -> `Tablet`
+- Tablet -> `Tablet`
+- TV card -> `TV and gaming-related accessories`
+- Macbook Pro Power supply -> `Battery/charger/adapter`
+- Photo album with voice recorder -> `Toy`
+- Singing microphone -> `Toy`
+- Printer -> `Printer/scanner`
+
+### Transfer wrong item
+
+
+```{r pc-accessory-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Charger|Macbook Pro Power supply",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Battery/charger/adapter", category_2),
+    category_2 = if_else(grepl(
+        "Laptop",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Laptop", category_2),
+    category_2 = if_else(grepl(
+        "DVD/CD player|TV card",
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2),
+    category_2 = if_else(grepl(
+        "Kettle",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Kettle", category_2),
+    category_2 = if_else(grepl(
+        "Camera flash",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Decorative or safety lights", category_2),
+    category_2 = if_else(grepl(
+        "MP3 player",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Handheld entertainment device", category_2),
+    category_2 = if_else(grepl(
+        "Playstation",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Games console", category_2),
+    category_2 = if_else(grepl(
+        "Satnav|Tablet",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Tablet", category_2),
+    category_2 = if_else(grepl(
+        "Photo album with voice recorder|Singing microphone",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Toy", category_2),
+    category_2 = if_else(grepl(
+        "Printer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Printer/scanner", category_2)
+    )
+```
+
+### After cleanup
+
+```{r pc-accessory-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "PC accessory") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Portable radio
+
+### Original
+
+```{r radio-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Portable radio") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Autoradio -> `Misc`
+- MP3 player -> `Handheld entertainment device`
+- Car cd player- alpine -> `Misc`
+- Car pump/Digital radio -> `Misc` 
+- car stereo -> `Misc`
+- Funkgerät Walkie Talkie  -> `Toy`
+- Walkie-talkie -> `Toy`
+- Walkman -> `Handheld entertainment device`
+
+### Transfer wrong item
+
+
+```{r radio-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Autoradio|Car cd player- alpine|Car pump/Digital radio|car stereo",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Misc", category_2),
+    category_2 = if_else(grepl(
+        "MP3 player|Walkman",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Handheld entertainment device", category_2),
+    category_2 = if_else(grepl(
+        "Funkgerät Walkie Talkie|Walkie-talkie",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Toy", category_2)
+    )
+```
+
+### After cleanup
+
+```{r radio-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Portable radio") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Power tool
+
+### Original
+
+```{r power-tool-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Power tool") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Hedge shear -> `Large home electrical`
+- High-pressure cleaner -> `Small home electrical`
+- Pressure washer -> `Small home electrical`
+- Heckenschere -> `Large home electrical`
+- Cleaner -> `Small home electrical`
+- Hedge Trimmer -> `Large home electrical`
+- Hochdruckreiniger -> `Small home electrical`
+- Kitchen mixer -> `Small kitchen item` 
+- Sewing machine -> `Sewing machine`
+- Window washer -> `Small home electrical`
+- Blender -> `Food processor` 
+- cleaner -> `Small home electrical`
+- Coffee maker -> `Coffee maker`
+- jet washer -> `Small home electrical`
+- Leaf blower -> `Large home electrical`
+- pressure washer -> `Small home electrical`
+- Snowblower -> `Large home electrical`
+- Car tyre pump -> `Misc`
+- Car washer -> `Small home electrical`
+- Garden Power Tool -> `Large home electrical`
+- Garden Strimmer -> `Large home electrical`
+- garden tool -> `Large home electrical`
+- Hair dryer -> `Hair dryer`
+- Heater -> `Small home electrical`
+- Hedge Clipper -> `Large home electrical`
+- Hedge Cutter -> `Large home electrical`
+- Hedge Strimmer -> `Large home electrical`
+- Hedge trimmers -> `Large home electrical`
+- Jet wash -> `Small home electrical`
+- Karcher Washer -> `Small home electrical`
+- Leaf Blower -> `Large home electrical`
+- Multimeter -> `Small home electrical`
+- Power extension -> `PC accessory`
+- power washer -> `Small home electrical`
+- Power washer -> `Small home electrical`
+- Preassure Cleaner -> `Small home electrical`
+- Preassure Washer -> `Small home electrical`
+- Pressure Washer -> `Small home electrical`
+- Pressure washerÂ -> `Small home electrical`
+- Recharge Tool Set -> `Battery/charger/adapter`
+- Shredder -> `Paper shredder`
+
+
+
+### Transfer wrong item
+
+
+```{r power-tool-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Hedge|Heckenschere|Leaf blower|Snowblower|Garden",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Large home electrical", category_2),
+    category_2 = if_else(category_2 == "Power tool" & item == "cleaner",
+                     "Small home electrical", category_2),
+    category_2 = if_else(category_2 == "Power tool" & item == "Cleaner",
+                     "Small home electrical", category_2),
+    category_2 = if_else(grepl(
+        "pressure cleaner|Pressure cleaner|Hochdruckreiniger|Multimeter|
+        |window washer|jet washer|car washer|jet wash|Karcher washer|
+        |power washer|preassure washer|pressure washer|preassure washer|
+        |pressure meter",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2),
+    category_2 = if_else(grepl(
+        "Blender|Kitchen mixer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Food processor", category_2),
+    category_2 = if_else(grepl(
+        "Sewing machine",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Sewing machine", category_2),
+    category_2 = if_else(grepl(
+        "Coffee maker",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Coffee maker", category_2),
+    category_2 = if_else(grepl(
+        "Car tyre pump",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Misc", category_2),    
+    category_2 = if_else(grepl(
+        "Hair dryer",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Hair dryer", category_2),
+    category_2 = if_else(grepl(
+        "Power extension",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "Recharge Tool Set",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Battery/charger/adapter", category_2),
+    category_2 = if_else(grepl(
+        "Shredder",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Paper shredder", category_2)
+    )
+```
+
+### After cleanup
+
+```{r power-tool-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Power tool") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Printer/scanner
+
+### Original
+
+```{r printer-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Printer/scanner") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is ok!
+
+## Projector
+
+### Original
+
+```{r projector-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Projector") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is ok!
+
+## Sewing machine 
+
+### Original
+
+```{r sewing-machine-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Sewing machine") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Besides that there are more than one item in one category: Everything is ok!
+
+## Small home electrical 
+
+### Original
+
+```{r small-home-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Small home electrical") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+- Kabeltrommel -> `PC accessory`
+- Walkie-talkie -> `Toy`
+- Metronom -> `Musical instrument`
+
+### Transfer wrong item
+
+
+```{r small-home-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Kabeltrommel",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "Walkie-talkie",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Toy", category_2),
+    category_2 = if_else(grepl(
+        "Metronom",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Musical instrument", category_2)
+    )
+```
+
+### After cleanup
+
+```{r small-home-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Small home electrical") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Small kitchen item
+
+### Original
+
+```{r small-kitchen-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Small kitchen item") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything ok!
+
+
+## Tablet
+
+### Original
+
+```{r tablet-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Tablet") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Display -> `Flat screen`
+- Dashcam nextbase -> `Digital compact camera`
+
+### Transfer wrong item
+
+
+```{r small-kitchen-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Display",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Flat screen", category_2),
+    category_2 = if_else(grepl(
+        "Dashcam",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Digital compact camera", category_2)
+    )
+```
+
+### After cleanup
+
+```{r small-kitchen-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Tablet") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+## Toaster
+
+### Original
+
+```{r toaster-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Toaster") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- tv/dvd player -> `TV and gaming-related accessories`
+
+### Transfer wrong item
+
+```{r toaster-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "tv/dvd player",
+            repair_cat2$item, ignore.case = TRUE), 
+            "TV and gaming-related accessories", category_2)
+    )
+```
+
+### After cleanup
+
+```{r toaster-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "Toaster") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+## Toy
+
+### Original
+
+```{r toy-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Toy") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Assuming that _Vacuum cleaner_ or _Sawing machine_ etc., are toys: Everything is ok!
+
+## TV and gaming-related accessories
+
+### Original
+
+```{r tv-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "TV and gaming-related accessories") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+- Television -> `Flat screen`
+- Home cinema -> `Flat screen`
+- Playstation -> `Games console`
+- Games console controller  -> `Games console`
+- Microphone -> `PC accessory`
+- Joystick -> `Games console`
+- Wii -> `Games console`
+- Cable -> `PC accessory`
+- tape recorder -> `Hi-Fi separates`
+- CD player -> `Hi-Fi separates`
+- Charger -> `Battery/charger/adapter`
+- Drohne -> `Toy`
+- Drone -> `Toy`
+- Game controller -> `Games console`
+- Gamepad -> `Games console`
+- Heimkinosystem -> `Flat screen`
+- Karaoke machine -> `Small home electrical`
+- Speaker -> `PC accessory`
+- sound bar -> `Hi-Fi separates`
+- Media player -> `Hi-Fi separates`
+- Tape recorder -> `Hi-Fi separates` 
+- X-box -> `Games console`
+- Xbox -> `Games console`
+
+### Transfer wrong items
+
+```{r tv-transfer}
+repair_cat2 <- repair_cat2 |> 
+    mutate(
+    category_2 = if_else(grepl(
+        "Television|Home cinema|Heimkinosystem",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Flat screen", category_2),
+    category_2 = if_else(grepl(
+        "Playstation|Games console controller|Joystick|Wii|Game controller|
+        |Gamepad|X-box|Xbox",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Games console", category_2),
+    category_2 = if_else(grepl(
+        "Microphone|Cable|Speaker",
+            repair_cat2$item, ignore.case = TRUE), 
+            "PC accessory", category_2),
+    category_2 = if_else(grepl(
+        "tape recorder|CD player|Media player|Tape recorder|sound bar",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Hi-Fi separates", category_2),
+    category_2 = if_else(grepl(
+        "Charger",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Battery/charger/adapter", category_2),
+    category_2 = if_else(grepl(
+        "Drohne|Drone",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Toy", category_2),
+    category_2 = if_else(grepl(
+        "Karaoke machine",
+            repair_cat2$item, ignore.case = TRUE), 
+            "Small home electrical", category_2)
+    )
+```
+
+### After cleanup
+
+
+```{r tv-cleanup, paged.print=FALSE}
+repair_cat2 |> 
+  filter(category_2 == "TV and gaming-related accessories") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+
+## Vacuum
+
+### Original
+
+```{r vacuum-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Vacuum") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is ok! 
+
+## Watch/clock
+
+### Original
+
+```{r watch-raw, paged.print=FALSE}
+repair_cat |> 
+  filter(category_2 == "Watch/clock") |> 
+  select(item) |> 
+  count(item) |> 
+  arrange(desc(n))
+```
+
+Everything is fine!
+
+
+# SUMMARY
+
+## Revised ORDS table
+
+The following table provides an enhancement of the [ORDS product category values](https://standard.openrepair.org/standard.html#ords-product-category-values). The original tables has only sparse examples. I took all these instances as mandatory rules for the appropriate level of category resp. product category value.
+
+Additionally I have added wrong examples to clarify the category level. 
+
+|                                   |                                                                                                                                                                                                                                                             |
+|-----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Aircon/dehumidifier               | Aircon/dehumidifier, Air conditioner, Air purifier, Humidifier, Window AC  NOT: Heater -> Small home electrical                                                                                                                                             |
+| Battery/charger/adapter           | Adapter, Battery, Battery charger Charger, Charger (battery / power supply)  Powerbank, Transformer (Household appliances electric),  NOT: Cable, Plug, Socket (= PC accessory)                                                                             |
+| Coffee maker                      | Coffee maker, Coffee machine, Espresso maker                                                                                                                                                                                                                |
+| Decorative or safety lights       | Bicycle light, Christmas lights, Decorative or safety lights, Fairy lights, Flashlight, Headlight, Headtorch, Solar light, Torch, xmas tree lights                                                                                                          |
+| Desktop computer                  | Computer, Computer tower, Desktop computer, Desktop, PC, PC tower                                                                                                                                                                                           |
+| Digital compact camera            | Camera, Digital Compact Camera, Photo camera                                                                                                                                                                                                                |
+| DSLR/video camera                 | Camcorder, DLSR / Video Camera, Video player/recorder, Video camera                                                                                                                                                                                         |
+| Fan                               | Extractor fan, Fan,   NOT: Fan heater -> Small home electrical                                                                                                                                                                                              |
+| Flat screen                       | Computer monitor, Computer screen, Display, Flat screen, Television, TV                                                                                                                                                                                     |
+| Food Processor                    | Blender, Chopper, Coffee grinder, Food processor, Juicer, Mixer, Whisk                                                                                                                                                                                      |
+| Games console                     | Games console, Controller, Nintendo, Playstation, PS3, PS4, Spielkonsole, Wii, XBox                                                                                                                                                                         |
+| Hair & beauty item                | Beard trimmer, Callus remover, Clipper/trimmer, Curling Iron, Electric hairbrush, Electric toothbrush,  Epilator, Footbath, Hair & beauty item, Hair straightener, Inhalator,  Ladyshave, Makeup-mirror, Nail care, Pedicure appliance, Shaver, Toothbrush  |
+| Hair dryer                        | Hair dryer,                                                                                                                                                                                                                                                 |
+| Handheld entertainment device     | Discman, Handheld entertainment device, iPod, MP3 player, MP4 player, Walkman                                                                                                                                                                               |
+| Headphones                        | Earbuds, Earphone, Headphones, Headset                                                                                                                                                                                                                      |
+| Hi-Fi integrated                  | Hifi, Hi-Fi integrated, Hifi system Music Center, Multimedia-Center, Home Stereo, Stereoset,                                                                                                                                                                |
+| Hi-Fi separates                   | Amplifier, Cassette player/recorder, CD-Player, CD player/recorder, Hi-Fi separates, Receiver, Speaker, Tape recorder,  Tuner, Turntable                                                                                                                    |
+| Iron                              | Iron, Steam iron,                                                                                                                                                                                                                                           |
+| Kettle                            | Electric kettle, Kettle                                                                                                                                                                                                                                     |
+| Lamp                              | Flashlight, Lamp/lighting, Lamp                                                                                                                                                                                                                             |
+| Laptop                            | Laptop, Laptop small, Laptop medium, Laptop large                                                                                                                                                                                                           |
+| Large home electrical             | Dishwasher, Electric hedge trimmer, Extractor hood, Fridge, Generator, Grass trimmer, Lawnmower, Leaf blower,  Microwave,  Oven, Pruning shears / Garden shears, Stove, Strimmer, Tumble dryer, Washing machine, Water pump                                 |
+| Misc                              | Car key, E-bike, Electric bed, Fitness machine, Hearing aid, Jukebox, Misc, Other, Scooter, Rollator, <NA>,                                                                                                                                                 |
+| Mobile                            | Cell phone, Handy, Mobile, Mobile phone (not smartphone), Phone, Smartphone, Telephone, Telephone (not mobile or smartphone)                                                                                                                                |
+| Musical instrument                | Drum machine, Electric guitar, Electric piano, Guitar pedal, Musical instrument, Keyboard (musical instrument),  Mixing desk,                                                                                                                               |
+| Paper shredder                    | Paper shredder, Paper cutter / trimmer, Shredder,                                                                                                                                                                                                           |
+| PC accessory                      | Cable, Cord, Hard disk, Keyboard, Mouse, Modem, PC assessory, Plug, Router                                                                                                                                                                                  |
+| Portable radio                    | Alarm clock radio, Clock radio, DAB Radio, Digital radio, Portable radio, Radio, Radio/CD player, Radio / tape recorder,                                                                                                                                    |
+| Power tool                        | Chain saw, Drilling machine, Dremel, Jigsaw tool, Power tool, Sander,    NOT: Hedge shear and all other garden tools (Large home electrical)       High-pressure cleaner and all other cleaning devices (Small home electrical)                             |
+| Printer/scanner                   | Copier, Drucker, Faxgerät, Printer, Printer/scanner,                                                                                                                                                                                                        |
+| Projector                         | Beamer, Film projector, Slide projector, Projector                                                                                                                                                                                                          |
+| Sewing machine                    | Sewing machine,                                                                                                                                                                                                                                             |
+| Small home electrical             | Baby monitor, Blood pressure monitor, Calculator, Carpet cleaner,  Doorbell, Electric blanket, Electric window wiper, Heater, Laminator, Multimeter Steam cleaner, Steam mop, Typewriter,                                                                   |
+| Small kitchen item                | Air fryer, Chopper, Citrus press, Coolbox, Electric knife, Heating element, Hob, Juice extractor, Milk frother, Rice cooker,  Small kitchen item, Scales, Waffle iron,                                                                                      |
+| Tablet                            | Bicycle computer, E-reader, iPad, Kindle Navigation system, Satnav, Toaster, Weather station                                                                                                                                                                |
+| Toaster                           | Breadmaker, Grill toaster, Sandwich maker, Toaster                                                                                                                                                                                                          |
+| Toy                               | Cuddly toy, Doll, Drone, Game, Hoverboard, Music box (toy), Remote controlled car, Toy, Transformer (Toy electric),  Walkie-talkie                                                                                                                          |
+| TV and gaming-related accessories | Blue-ray player, Decoder TV, DVD-Player, DVD Cinema System, Remote control, Satellite receiver, Set-top box, Video player/recorder, Home cinema, Satellite receiver  NOT: Television!!! -> Flat screen! NOT: all Gaming related items!!! -> Gaming console! |
+| Vacuum                            | Dyson, Handheld vacuum cleaner, Hoover, Vacuum, Vacuum cleaner  NOT: Steam cleaner, Carpet cleaner, Carpet sweeper!!! -> Small home electrical                                                                                                              |
+| Watch/clock                       | Alarm clock, Clock, Cooking timer, Egg timer, Wrist watch, Smartwatch, Timer,                                                                                                                                                                               |
+
+## General variables
+
+There are four very general defined variables which need more explanations:
+
+1.  Large home electrical
+2.  Small home electrical
+3.  Small kitchen item
+4.  Misc
+
+These four columns are rest categories gathering all items that do not fit elsewhere. But even if they are very mixed, some general rules apply:
+
+-   Most items of `large home electrical` have to do with:
+
+    -   **household chores**: washing machine, dishwasher, tumble dryer, spin dryer, trouser press, steam mop, carpet cleaner, etc.
+
+    -   **food**: microwave, oven, extractor hood, chest freezer, fridge, water cooler, etc.
+
+    -   **garden tools**: grass trimmer, grass shears, strimmer, hedge trimmer, hedge cutter, lawnmower, etc.
+    
+    -   **health, fitness & mobility**: E-bike, Electric bed, Fitness machine, Rollator,  Scooter etc.
+
+-   In contrast, items belonging under `small home electrical` are not related to kitchen (= `small kitchen item`) and garden but to household chores (steam mops, steam cleaner, carpet cleaner, etc.), furniture (heater, doorbell, baby monitor, etc.), clothing (e.g., neck warmer), and health (e.g. hearing aid).
+
+-   To get a clear differentiation for `small kitchen item,` I will categorize under this heading simply those small kitchen devices that were not enumerated under `large home electrical`: rice cooker, electric waffle iron, milk frother, percolator, kitchen scales, fryer, popcorn machine.
+
+-   Finally, to all other devices, I will assign `Misc` as the rest category.
+
+Note that the garden tools are not collected under `power tool`s, even if they are DIY tools. But the difference is that they are necessary for caring and cannot be used for building or constructing new items. The result of this distinction is that hedge shear, leaf blower, snow blower, strimmer, etc., do not belong to this definition of DIY tool (`power tool`).
+
+On the other hand, cleaning or maintenance equipment (high-pressure cleaner, window washer, car washer, etc.) does not fit into `Power tool,` but `Small home electrical`. Some DIY instruments (e.g., multimeter, voltmeter) are still collected under `small home electrical` and not categorized under `power tool`. Power tools are for constructing (building new things) whereas those mentioned instruments function first and foremost as repair tools, e.g., for maintenance and not for constructing.
+
+## Save data
+
+Finally I will save the resulting dataset. 
+
+```{r save-data}
+saveRDS(repair_cat2, "../data/repair_df.rds")
+```
+
+
+
+## Items per category
+
+Finally I will shown all items per category level again to check the resulting dataset.
+
+```{r show-items-per-cat}
+cat_40 <- fct_count(repair_cat2$category_2) |> 
+    rename(cats = f) |> 
+    select(cats) 
+
+
+for (i in 1:40) {
+  item_group <- levels(cat_40$cats)[i]
+  my_cat <- repair_cat2 |> 
+    filter(category_2 == item_group) |> 
+    select(item) |> 
+    count(item) |> 
+  arrange(desc(n))
+  
+  writeLines("******************************************************************")
+  print(item_group)
+  writeLines("******************************************************************")
+  print(my_cat)
+}
+  
+```
+
+
